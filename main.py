@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response, status
@@ -6,25 +7,25 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from pydantic import AfterValidator, BaseModel
 
+from memory_repository import InMemoryTaskRepository
+from repository import TaskRepository
+
+repository: TaskRepository = InMemoryTaskRepository()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    repository.connect()
+    yield
+    repository.close()
+
+
 app = FastAPI(
     title="Task API",
     version="1.0",
     description="A small to-do API with in-memory storage. Data resets when the server restarts.",
+    lifespan=lifespan,
 )
-
-SEED = [
-    {"id": 1, "title": "Read the assignment", "done": True},
-    {"id": 2, "title": "Build the Task API", "done": False},
-    {"id": 3, "title": "Push to GitHub", "done": False},
-]
-
-
-def seed_tasks() -> list[dict]:
-    # Fresh dicts each time, so POST /reset cannot hand back mutated seed rows.
-    return [dict(task) for task in SEED]
-
-
-TASKS = seed_tasks()
 
 
 def not_blank(value: str) -> str:
@@ -110,16 +111,10 @@ def openapi_without_422():
 app.openapi = openapi_without_422
 
 
-def find_index(task_id: int) -> int:
-    for index, task in enumerate(TASKS):
-        if task["id"] == task_id:
-            return index
-    raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-
-
-def next_id() -> int:
-    # max + 1, not len + 1, so ids stay unique after a delete.
-    return max((task["id"] for task in TASKS), default=0) + 1
+def task_or_404(task: dict | None, task_id: int) -> dict:
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    return task
 
 
 @app.get("/", summary="Describe this API")
@@ -141,26 +136,17 @@ def list_tasks(
         str | None, Query(description="Only tasks whose title contains this")
     ] = None,
 ):
-    tasks = TASKS
-    if done is not None:
-        tasks = [task for task in tasks if task["done"] == done]
-    if search:
-        needle = search.lower()
-        tasks = [task for task in tasks if needle in task["title"].lower()]
-    return tasks
+    return repository.list_tasks(done=done, search=search)
 
 
 @app.get("/stats", summary="Count tasks by state")
 def read_stats():
-    done = sum(1 for task in TASKS if task["done"])
-    return {"total": len(TASKS), "done": done, "open": len(TASKS) - done}
+    return repository.count_tasks()
 
 
 @app.post("/reset", response_model=list[Task], summary="Restore the example tasks")
 def reset_tasks():
-    global TASKS
-    TASKS = seed_tasks()
-    return TASKS
+    return repository.reset_tasks()
 
 
 @app.get(
@@ -170,7 +156,7 @@ def reset_tasks():
     summary="Get one task by id",
 )
 def read_task(task_id: int):
-    return TASKS[find_index(task_id)]
+    return task_or_404(repository.get_task(task_id), task_id)
 
 
 @app.post(
@@ -181,9 +167,7 @@ def read_task(task_id: int):
     summary="Create a task",
 )
 def create_task(payload: TaskCreate):
-    task = {"id": next_id(), "title": payload.title, "done": False}
-    TASKS.append(task)
-    return task
+    return repository.create_task(payload.title)
 
 
 @app.put(
@@ -204,9 +188,7 @@ def update_task(task_id: int, payload: TaskUpdate):
             status_code=400,
             detail="Invalid request body: provide 'title' and/or 'done'",
         )
-    index = find_index(task_id)
-    TASKS[index] = {**TASKS[index], **changes}
-    return TASKS[index]
+    return task_or_404(repository.update_task(task_id, changes), task_id)
 
 
 @app.delete(
@@ -216,6 +198,6 @@ def update_task(task_id: int, payload: TaskUpdate):
     summary="Delete a task",
 )
 def delete_task(task_id: int):
-    index = find_index(task_id)
-    TASKS.pop(index)
+    if not repository.delete_task(task_id):
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
