@@ -1,7 +1,9 @@
-from fastapi import FastAPI, HTTPException, Request, status
+from typing import Annotated
+
+from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, field_validator
+from pydantic import AfterValidator, BaseModel
 
 app = FastAPI()
 
@@ -12,16 +14,23 @@ TASKS = [
 ]
 
 
-class TaskCreate(BaseModel):
-    title: str
+def not_blank(value: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError("title must not be empty")
+    return cleaned
 
-    @field_validator("title")
-    @classmethod
-    def title_must_not_be_blank(cls, value: str) -> str:
-        cleaned = value.strip()
-        if not cleaned:
-            raise ValueError("title must not be empty")
-        return cleaned
+
+Title = Annotated[str, AfterValidator(not_blank)]
+
+
+class TaskCreate(BaseModel):
+    title: Title
+
+
+class TaskUpdate(BaseModel):
+    title: Title | None = None
+    done: bool | None = None
 
 
 # FastAPI renders errors as {"detail": ...}; this API's contract is {"error": ...}.
@@ -39,10 +48,10 @@ def render_validation_error(request: Request, exc: RequestValidationError):
     return JSONResponse(status_code=400, content={"error": message})
 
 
-def find_task(task_id: int):
-    for task in TASKS:
+def find_index(task_id: int) -> int:
+    for index, task in enumerate(TASKS):
         if task["id"] == task_id:
-            return task
+            return index
     raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
 
 
@@ -68,7 +77,7 @@ def list_tasks():
 
 @app.get("/tasks/{task_id}")
 def read_task(task_id: int):
-    return find_task(task_id)
+    return TASKS[find_index(task_id)]
 
 
 @app.post("/tasks", status_code=status.HTTP_201_CREATED)
@@ -76,3 +85,27 @@ def create_task(payload: TaskCreate):
     task = {"id": next_id(), "title": payload.title, "done": False}
     TASKS.append(task)
     return task
+
+
+@app.put("/tasks/{task_id}")
+def update_task(task_id: int, payload: TaskUpdate):
+    # Drop unset fields and explicit nulls, so {"title": null} reads as invalid, not as a blank title.
+    changes = {
+        field: value
+        for field, value in payload.model_dump(exclude_unset=True).items()
+        if value is not None
+    }
+    if not changes:
+        raise HTTPException(
+            status_code=400, detail="Invalid request body: provide 'title' and/or 'done'"
+        )
+    index = find_index(task_id)
+    TASKS[index] = {**TASKS[index], **changes}
+    return TASKS[index]
+
+
+@app.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_task(task_id: int):
+    index = find_index(task_id)
+    TASKS.pop(index)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
