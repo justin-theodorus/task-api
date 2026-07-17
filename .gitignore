@@ -2,3 +2,9 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Local secrets: never commit
+.env
+
+# Tool caches
+.ruff_cache/
