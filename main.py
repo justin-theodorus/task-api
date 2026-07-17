@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Request, Response, status
+from fastapi import FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
@@ -12,11 +12,19 @@ app = FastAPI(
     description="A small to-do API with in-memory storage. Data resets when the server restarts.",
 )
 
-TASKS = [
+SEED = [
     {"id": 1, "title": "Read the assignment", "done": True},
     {"id": 2, "title": "Build the Task API", "done": False},
     {"id": 3, "title": "Push to GitHub", "done": False},
 ]
+
+
+def seed_tasks() -> list[dict]:
+    # Fresh dicts each time, so POST /reset cannot hand back mutated seed rows.
+    return [dict(task) for task in SEED]
+
+
+TASKS = seed_tasks()
 
 
 def not_blank(value: str) -> str:
@@ -58,12 +66,25 @@ def render_error(request: Request, exc: HTTPException):
     return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
 
 
-# Pydantic rejects a bad body with 422; the API contract calls for 400.
+LOCATIONS = {
+    "body": "request body",
+    "query": "query parameter",
+    "path": "path parameter",
+}
+
+
+# Pydantic rejects bad input with 422; the API contract calls for 400.
 @app.exception_handler(RequestValidationError)
 def render_validation_error(request: Request, exc: RequestValidationError):
     first = exc.errors()[0]
-    field = first["loc"][-1]
-    message = f"Invalid request body: '{field}' {first['msg'].removeprefix('Value error, ')}"
+    location = first["loc"]
+    where = LOCATIONS.get(location[0], "request")
+    reason = first["msg"].removeprefix("Value error, ")
+    # loc is ("body",) when the body is missing entirely, ("body", "title") when a field is at fault.
+    if len(location) > 1:
+        message = f"Invalid {where}: '{location[-1]}' {reason}"
+    else:
+        message = f"Invalid {where}: {reason}"
     return JSONResponse(status_code=400, content={"error": message})
 
 
@@ -111,8 +132,34 @@ def read_health():
     return {"status": "ok"}
 
 
-@app.get("/tasks", response_model=list[Task], summary="List every task")
-def list_tasks():
+@app.get("/tasks", response_model=list[Task], summary="List tasks, optionally filtered")
+def list_tasks(
+    done: Annotated[
+        bool | None, Query(description="Only tasks with this done state")
+    ] = None,
+    search: Annotated[
+        str | None, Query(description="Only tasks whose title contains this")
+    ] = None,
+):
+    tasks = TASKS
+    if done is not None:
+        tasks = [task for task in tasks if task["done"] == done]
+    if search:
+        needle = search.lower()
+        tasks = [task for task in tasks if needle in task["title"].lower()]
+    return tasks
+
+
+@app.get("/stats", summary="Count tasks by state")
+def read_stats():
+    done = sum(1 for task in TASKS if task["done"])
+    return {"total": len(TASKS), "done": done, "open": len(TASKS) - done}
+
+
+@app.post("/reset", response_model=list[Task], summary="Restore the example tasks")
+def reset_tasks():
+    global TASKS
+    TASKS = seed_tasks()
     return TASKS
 
 
@@ -154,7 +201,8 @@ def update_task(task_id: int, payload: TaskUpdate):
     }
     if not changes:
         raise HTTPException(
-            status_code=400, detail="Invalid request body: provide 'title' and/or 'done'"
+            status_code=400,
+            detail="Invalid request body: provide 'title' and/or 'done'",
         )
     index = find_index(task_id)
     TASKS[index] = {**TASKS[index], **changes}
