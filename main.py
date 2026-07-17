@@ -1,6 +1,10 @@
+import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Annotated
 
+import redis
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
@@ -10,7 +14,32 @@ from pydantic import AfterValidator, BaseModel
 from memory_repository import InMemoryTaskRepository
 from repository import TaskRepository
 
-repository: TaskRepository = InMemoryTaskRepository()
+load_dotenv()
+
+
+def build_repository() -> TaskRepository:
+    """The only place that decides where tasks are stored.
+
+    Set DATABASE_URL and tasks live in Postgres and survive a restart. Leave it unset and they
+    live in a list and do not. Nothing below this function knows the difference.
+    """
+    connection_string = os.getenv("DATABASE_URL")
+    if not connection_string:
+        return InMemoryTaskRepository()
+
+    from postgres_repository import PostgresTaskRepository
+
+    return PostgresTaskRepository(connection_string)
+
+
+repository: TaskRepository = build_repository()
+
+logger = logging.getLogger("uvicorn.error")
+
+# Nothing is cached in Redis yet. It is wired up now so /health proves the connection works
+# before anything depends on it.
+redis_url = os.getenv("REDIS_URL")
+redis_client = redis.from_url(redis_url) if redis_url else None
 
 
 @asynccontextmanager
@@ -23,7 +52,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Task API",
     version="1.0",
-    description="A small to-do API with in-memory storage. Data resets when the server restarts.",
+    description="A small to-do API. Tasks live in Postgres when DATABASE_URL is set, in memory otherwise.",
     lifespan=lifespan,
 )
 
@@ -122,9 +151,19 @@ def read_root():
     return {"name": "Task API", "version": "1.0", "endpoints": ["/tasks"]}
 
 
-@app.get("/health", summary="Check the server is alive")
+@app.get("/health", summary="Check the server and its dependencies are alive")
 def read_health():
-    return {"status": "ok"}
+    health = {"status": "ok", "storage": repository.name}
+    if redis_client is None:
+        return health
+    try:
+        redis_client.ping()
+        health["redis"] = "ok"
+    except redis.RedisError as exc:
+        # A dead cache must not make the server look dead, but it must not pass silently either.
+        logger.warning("Redis ping failed: %s", exc)
+        health["redis"] = "unavailable"
+    return health
 
 
 @app.get("/tasks", response_model=list[Task], summary="List tasks, optionally filtered")

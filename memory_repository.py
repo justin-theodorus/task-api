@@ -1,14 +1,11 @@
 from repository import TaskRepository
-
-SEED = [
-    {"id": 1, "title": "Read the assignment", "done": True},
-    {"id": 2, "title": "Build the Task API", "done": False},
-    {"id": 3, "title": "Push to GitHub", "done": False},
-]
+from seed import SEED
 
 
 class InMemoryTaskRepository(TaskRepository):
     """Tasks in a Python list. Fast, simple, and gone when the process stops."""
+
+    name = "memory"
 
     def __init__(self) -> None:
         self._tasks = self._seed()
@@ -16,7 +13,7 @@ class InMemoryTaskRepository(TaskRepository):
     @staticmethod
     def _seed() -> list[dict]:
         # Fresh dicts each time, so a reset cannot hand back mutated seed rows.
-        return [dict(task) for task in SEED]
+        return [{"id": index, **task} for index, task in enumerate(SEED, start=1)]
 
     def _find_index(self, task_id: int) -> int | None:
         for index, task in enumerate(self._tasks):
@@ -28,7 +25,9 @@ class InMemoryTaskRepository(TaskRepository):
         # max + 1, not len + 1, so ids stay unique after a delete.
         return max((task["id"] for task in self._tasks), default=0) + 1
 
-    def list_tasks(self, done: bool | None = None, search: str | None = None) -> list[dict]:
+    def list_tasks(
+        self, done: bool | None = None, search: str | None = None
+    ) -> list[dict]:
         tasks = self._tasks
         if done is not None:
             tasks = [task for task in tasks if task["done"] == done]
@@ -62,7 +61,11 @@ class InMemoryTaskRepository(TaskRepository):
 
     def count_tasks(self) -> dict:
         done = sum(1 for task in self._tasks if task["done"])
-        return {"total": len(self._tasks), "done": done, "open": len(self._tasks) - done}
+        return {
+            "total": len(self._tasks),
+            "done": done,
+            "open": len(self._tasks) - done,
+        }
 
     def reset_tasks(self) -> list[dict]:
         self._tasks = self._seed()

@@ -8,6 +8,9 @@ class TaskRepository(ABC):
     reported as None or False, and the route layer turns that into a 404.
     """
 
+    name: str
+    """Which store this is, reported by /health."""
+
     def connect(self) -> None:
         """Acquire whatever the implementation needs. Called once at startup."""
 
@@ -15,7 +18,9 @@ class TaskRepository(ABC):
         """Release it again. Called once at shutdown."""
 
     @abstractmethod
-    def list_tasks(self, done: bool | None = None, search: str | None = None) -> list[dict]:
+    def list_tasks(
+        self, done: bool | None = None, search: str | None = None
+    ) -> list[dict]:
         """Every task, filtered by done state and/or a case-insensitive title match."""
 
     @abstractmethod
